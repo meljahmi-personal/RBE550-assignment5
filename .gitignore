@@ -1,0 +1,26 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Build / outputs
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.mp4
+*.csv
+*.log
+
+# Virtual environments
+venv/
+.venv/
+.env/
+hw5env/
+
+# Editor/OS junk
+.DS_Store
+
+# Jupyter etc (if any)
+.ipynb_checkpoints/
+
