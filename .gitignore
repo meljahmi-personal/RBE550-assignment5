@@ -1,3 +1,4 @@
+
 results/frames/
 results/gifs/
 
@@ -6,20 +7,28 @@ __pycache__/
 *.pyc
 *.swp
 
+
+# Build / outputs
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.mp4
+*.csv
+*.log
+
+
 # Virtual environments
 venv/
 .venv/
 env/
+.env/
+
 hw5env/
 
 # Editor/OS junk
 .DS_Store
 
-# Build / outputs
-*.png
-*.gif
-*.mp4
-*.avi
 
 # Jupyter etc (if any)
 .ipynb_checkpoints/
