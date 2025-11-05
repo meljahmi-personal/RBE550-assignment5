@@ -1,12 +1,7 @@
-
-results/frames/
-results/gifs/
-
 # Python cache
 __pycache__/
 *.pyc
-*.swp
-
+*.pyo
 
 # Build / outputs
 *.png
@@ -17,18 +12,14 @@ __pycache__/
 *.csv
 *.log
 
-
 # Virtual environments
 venv/
 .venv/
-env/
 .env/
-
 hw5env/
 
 # Editor/OS junk
 .DS_Store
-
 
 # Jupyter etc (if any)
 .ipynb_checkpoints/
