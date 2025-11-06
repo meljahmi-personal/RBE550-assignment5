@@ -1,9 +1,9 @@
-# Python cache
+# Byte-compiled / cache
 __pycache__/
 *.pyc
 *.pyo
 
-# Build / outputs
+# Build artifacts and generated outputs
 *.png
 *.jpg
 *.jpeg
@@ -11,16 +11,27 @@ __pycache__/
 *.mp4
 *.csv
 *.log
+*.pdf
+*.tar
+*.zip
 
-# Virtual environments
+# Results directory (simulation outputs)
+results/
+results/*
+results/**/*.*
+results/champion.txt
+
+# Local virtual environments
 venv/
 .venv/
 .env/
 hw5env/
 
-# Editor/OS junk
+# Editor and OS junk
 .DS_Store
-
-# Jupyter etc (if any)
+.idea/
+.vscode/
 .ipynb_checkpoints/
 
+results/
+results/champion.txt
