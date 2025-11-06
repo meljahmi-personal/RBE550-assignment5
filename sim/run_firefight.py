@@ -1,133 +1,162 @@
 #!/usr/bin/env python3
+"""
+run_firefight.py
+Main simulation driver for RBE550 HW5 (Wildfire).
+
+Responsibilities
+---------------
+- Build a wildfire world (250 m × 250 m, 5 m cells, tetromino-style obstacles).
+- Create agents: Wumpus (discrete/grid) and Firetruck (kinematic with PRM).
+- Run a fixed-duration discrete-time loop (simulation time, not wall-clock).
+- Log events to per-run CSVs, and write summary + timing tables.
+
+Outputs (written to --outdir)
+-----------------------------
+- run_<seed>.csv      : timeline of events (t, event, x, y, notes)
+- summary.csv         : per-run scores
+- champion.txt        : winner (“truck”, “wumpus”, or “none”)
+- compute_times.csv   : CPU-time breakdown (wumpus / PRM build / PRM queries)
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import os
+import time
+
 from src_env.wildfire_world import WildfireWorld
-from src_env.fire_state import update_fire
+from src_env.fire_state import ignite_obstacle, update_fire
 from agents.wumpus import Wumpus
 from agents.firetruck import Firetruck
 from plan.prm import PRM
-import argparse, csv, os, time
 
 
-TELEMETRY_DT = 10     # log a timeline sample every 10 ticks (fixed cadence)
-
-
-
-"""
-Main simulation driver for the Wildfire scenario.
-
-For each run:
-- create world using the given seed
-- create agents (Wumpus, Firetruck)
-- run a fixed-duration simulation loop
-- collect timing and score statistics
-- write CSV logs for that run
-
-This file also writes:
-  summary.csv
-  champion.txt
-  compute_times.csv
-"""
+# Log a telemetry row every N simulated seconds
+TELEMETRY_DT = 10
 
 
 def _run_single_sim(seed: int, duration: int, wall_time: float = 0.0):
     """
-    Run one wildfire simulation for a specified virtual duration.
+    Run one wildfire simulation for `duration` seconds of simulation time.
 
     Parameters
     ----------
     seed : int
-        Random seed used to generate the obstacle field and agent start positions.
+        Random seed for world generation and agent starts.
     duration : int
-        Total simulation time in seconds (simulation time, not real time).
-    wall_time : float, optional
-        Target real-world runtime for this simulation, in seconds. If greater than zero,
-        the loop adds short sleeps so the full run lasts roughly wall_time seconds.
+        Total simulated seconds. The loop advances in 1 s steps.
+    wall_time : float
+        If > 0, throttle the loop so the real (wall-clock) runtime
+        is approximately this value. Does not affect simulation time.
+
+    Returns
+    -------
+    rows : list[list]
+        Event rows for the per-run CSV: [t, event, x, y, notes].
+    scores : tuple
+        (wumpus_ignited, wumpus_burned, truck_extinguished)
+    timings : tuple
+        (t_wumpus_total, t_prm_build, t_prm_query_total)
     """
+    per_step_budget = (wall_time / float(duration)) if wall_time > 0 else 0.0
 
-    # pacing setup
-    per_step_budget = wall_time / float(duration) if wall_time > 0 else 0.0
+    rows = [[0, "init", 0.0, 0.0, f"seed={seed}"]]
 
-    per_run_rows = [[0, "init", 0.0, 0.0, f"seed={seed}"]]
-
-    # world and planners
+    # World
     world = WildfireWorld(seed=seed)
 
+    # Seed one ignition at t=0 so spreading/physics have a driver
+    if getattr(world, "obstacles", None):
+        ignite_obstacle(world, 0, t_now=0)
+        x0, y0 = world.obstacles[0].center_xy()
+        rows.append([0, "ignite", x0, y0, "obs=0 (seed)"])
+
+    # PRM (roadmap) build time
     t0 = time.perf_counter()
     prm = PRM(world)
     prm.build()
     t_prm_build = time.perf_counter() - t0
 
-    # agents
+    # Agents
     wumpus = Wumpus(start_ij=world.wumpus_start)
     truck = Firetruck(start_pose=world.firetruck_start)
 
-    # score and timing
-    wumpus_ignited = wumpus_burned = truck_extinguished = 0
-    t_wumpus_total = t_prm_query_total = 0.0
-    burned_awarded = set()
+    # Score & timing accumulators
+    wumpus_ignited = 0
+    wumpus_burned = 0
+    truck_extinguished = 0
 
+    t_wumpus_total = 0.0
+    t_prm_query_total = 0.0
+    burned_awarded: set[int] = set()
+
+    # Main loop (discrete time, 1 second per iteration)
     for t_now in range(duration):
-        step_start = time.perf_counter()
+        tick_start = time.perf_counter()
 
+        # Lightweight heartbeat
         if t_now % 300 == 0:
             print(f"  [seed={seed}] t={t_now}/{duration}")
 
+        # Telemetry at fixed cadence
         if (t_now % TELEMETRY_DT) == 0:
-            per_run_rows.append([t_now, "telemetry", 0.0, 0.0, ""])
+            rows.append([t_now, "telemetry", 0.0, 0.0, ""])
 
-        # Wumpus planning and ignition
+        # ---- Wumpus step (may ignite adjacent obstacles) ----
         tA = time.perf_counter()
         prev_states = [obs.state for obs in world.obstacles]
         wumpus.step(world, t_now)
-        after_states = [obs.state for obs in world.obstacles]
-        for idx, (before, after) in enumerate(zip(prev_states, after_states)):
+        aft_states = [obs.state for obs in world.obstacles]
+
+        for idx, (before, after) in enumerate(zip(prev_states, aft_states)):
             if before == world.STATE_INTACT and after == world.STATE_BURNING:
                 wumpus_ignited += 1
-                cx, cy = world.obstacles[idx].center_xy()
-                per_run_rows.append([t_now, "ignite", cx, cy, f"obs={idx}"])
-        t_wumpus_total += time.perf_counter() - tA
+                x, y = world.obstacles[idx].center_xy()
+                rows.append([t_now, "ignite", x, y, f"obs={idx}"])
 
-        # Firetruck planning and extinguishing
+        t_wumpus_total += (time.perf_counter() - tA)
+
+        # ---- Firetruck step (may extinguish) ----
         tB = time.perf_counter()
         did_extinguish = truck.step(world, t_now, dt=1.0)
         if did_extinguish:
+            target = getattr(truck, "target_obs", None)
+            note = f"obs={target}" if target is not None else ""
+            rows.append([t_now, "extinguish", truck.x, truck.y, note])
             truck_extinguished += 1
-            per_run_rows.append([t_now, "extinguish", truck.x, truck.y,
-                                 f"obs={truck.target_obs}"])
-        t_prm_query_total += time.perf_counter() - tB
+        t_prm_query_total += (time.perf_counter() - tB)
 
-        # Fire propagation and scoring
+        # ---- Fire physics (spread + burnout) ----
+        prev_states = aft_states  # reuse the latest
         update_fire(world, t_now)
-        for idx, obs in enumerate(world.obstacles):
-            if obs.state == world.STATE_BURNED and idx not in burned_awarded:
+        aft_states = [obs.state for obs in world.obstacles]
+
+        for idx, (before, after) in enumerate(zip(prev_states, aft_states)):
+            # Spreading ignition also credits the Wumpus per rubric
+            if before == world.STATE_INTACT and after == world.STATE_BURNING:
+                wumpus_ignited += 1
+                x, y = world.obstacles[idx].center_xy()
+                rows.append([t_now, "ignite", x, y, f"obs={idx}"])
+
+            # Burnout → score one "burned" exactly once
+            elif (before == world.STATE_BURNING
+                  and after == world.STATE_BURNED
+                  and idx not in burned_awarded):
                 burned_awarded.add(idx)
                 wumpus_burned += 1
-                cx, cy = obs.center_xy()
-                per_run_rows.append([t_now, "burned", cx, cy, f"obs={idx}"])
+                x, y = world.obstacles[idx].center_xy()
+                rows.append([t_now, "burned", x, y, f"obs={idx}"])
 
-        # optional pacing to meet wall_time target
+        # Optional pacing to approximate wall_time
         if per_step_budget > 0.0:
-            elapsed = time.perf_counter() - step_start
+            elapsed = time.perf_counter() - tick_start
             delay = per_step_budget - elapsed
             if delay > 0:
                 time.sleep(delay)
 
-    # sample events for replay (used only for animation)
-    demo_events = [
-        (10, "ignite", 30.0, 40.0, "Wumpus ignites obstacle"),
-        (20, "ignite", 60.0, 90.0, "Wumpus ignites obstacle"),
-        (30, "ignite", 120.0, 80.0, "Wumpus ignites obstacle"),
-        (40, "extinguish", 32.0, 42.0, "Truck sprays water"),
-        (50, "extinguish", 62.0, 92.0, "Truck sprays water"),
-        (60, "burned", 120.0, 80.0, "Obstacle fully burned"),
-        (70, "ignite", 150.0, 140.0, "Wumpus keeps spreading fire"),
-        (80, "extinguish", 150.0, 140.0, "Truck contains hotspot"),
-        (90, "ignite", 180.0, 200.0, "Late flare-up"),
-        (100, "extinguish", 180.0, 200.0, "Final suppression"),
-    ]
-    per_run_rows.extend(demo_events)
-
     return (
-        per_run_rows,
+        rows,
         (wumpus_ignited, wumpus_burned, truck_extinguished),
         (t_wumpus_total, t_prm_build, t_prm_query_total),
     )
@@ -139,21 +168,21 @@ def main():
     ap.add_argument('--duration', type=int, default=3600)
     ap.add_argument('--outdir', type=str, default='results')
     ap.add_argument('--seed_base', type=int, default=1000)
-    ap.add_argument('--wall_time', type=float, default=0.0,
-                help='If >0, target wall-clock seconds to spend on each run (e.g., 30).')
-
+    ap.add_argument(
+        '--wall_time', type=float, default=0.0,
+        help='If > 0, target wall-clock seconds per run (for live demos).'
+    )
     args = ap.parse_args()
-    
-    start_all = time.perf_counter()          # <--- start total timer
+
+    start_all = time.perf_counter()
 
     os.makedirs(args.outdir, exist_ok=True)
 
     compute_rows = []
-    summary_rows = [['run_id','seed',
-                     'wumpus_ignited','wumpus_burned','truck_extinguished',
-                     'wumpus_score','truck_score']]
-
-    wins = {'wumpus':0, 'truck':0}
+    summary_rows = [['run_id', 'seed',
+                     'wumpus_ignited', 'wumpus_burned', 'truck_extinguished',
+                     'wumpus_score', 'truck_score']]
+    wins = {'wumpus': 0, 'truck': 0}
 
     for i in range(args.runs):
         seed = args.seed_base + i
@@ -170,63 +199,51 @@ def main():
         wumpus_ignited, wumpus_burned, truck_extinguished = scores
         t_wumpus, t_prm_build, t_prm_queries = timing
 
-        # score calc
+        # Scores per rubric
         wumpus_score = wumpus_ignited + wumpus_burned
-        truck_score  = 2 * truck_extinguished
+        truck_score = 2 * truck_extinguished
 
-        # write per-run CSV
+        # Per-run CSV
         with open(os.path.join(args.outdir, f'{run_id}.csv'), 'w', newline='') as f:
             w = csv.writer(f)
-            w.writerow(['t','event','x','y','notes'])
-            for row in per_run_rows:
-                w.writerow(row)
+            w.writerow(['t', 'event', 'x', 'y', 'notes'])
+            w.writerows(per_run_rows)
 
-        # add to summary
+        # Summary
         summary_rows.append([
-            run_id,
-            seed,
-            wumpus_ignited,
-            wumpus_burned,
-            truck_extinguished,
-            wumpus_score,
-            truck_score
+            run_id, seed,
+            wumpus_ignited, wumpus_burned, truck_extinguished,
+            wumpus_score, truck_score
         ])
 
-        # compute timing row
-        compute_rows.append([
-            run_id,
-            t_wumpus,
-            t_prm_build,
-            t_prm_queries
-        ])
+        # Timing table
+        compute_rows.append([run_id, t_wumpus, t_prm_build, t_prm_queries])
 
-        # winner tally
+        # Match win
         if truck_score > wumpus_score:
             wins['truck'] += 1
         elif wumpus_score > truck_score:
             wins['wumpus'] += 1
 
-    # summary.csv
+    # Write summary files
     with open(os.path.join(args.outdir, 'summary.csv'), 'w', newline='') as f:
-        w = csv.writer(f)
-        w.writerows(summary_rows)
+        csv.writer(f).writerows(summary_rows)
 
-    # champion.txt
-    champion = 'truck' if wins['truck'] >= 3 else ('wumpus' if wins['wumpus'] >= 3 else 'none')
+    champion = (
+        'truck' if wins['truck'] >= 3
+        else 'wumpus' if wins['wumpus'] >= 3
+        else 'none'
+    )
     with open(os.path.join(args.outdir, 'champion.txt'), 'w') as f:
         f.write(champion + '\n')
 
-    # compute_times.csv
     with open(os.path.join(args.outdir, 'compute_times.csv'), 'w', newline='') as f:
         w = csv.writer(f)
-        w.writerow(['run_id','wumpus_planning_s','firetruck_roadmap_s','firetruck_queries_s'])
-        for row in compute_rows:
-            w.writerow(row)
-            
-    end_all = time.perf_counter()            # <--- stop total timer
-    total_elapsed = end_all - start_all
-    print(f"\n[INFO] Total runtime: {total_elapsed:.2f} seconds wall time.")
+        w.writerow(['run_id', 'wumpus_planning_s', 'firetruck_roadmap_s', 'firetruck_queries_s'])
+        w.writerows(compute_rows)
 
+    total_elapsed = time.perf_counter() - start_all
+    print(f"\n[INFO] Total runtime: {total_elapsed:.2f} seconds wall time.")
 
 
 if __name__ == '__main__':

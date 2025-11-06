@@ -1,102 +1,133 @@
 """
 Firetruck agent (defender).
-Continuous pose (x,y,theta), responds to burning obstacles, tries to extinguish.
-Uses PRM for navigation (will be wired later).
+State: (x, y, theta) in meters/radians.
+Behavior: pick a burning obstacle, move toward it, extinguish within radius after hold time.
 """
 
 from typing import Optional, Tuple
+import math
 from src_env import fire_state
+
 
 class Firetruck:
     def __init__(self, start_pose: Tuple[float, float, float]):
-        # pose in meters, heading in radians
         self.x, self.y, self.theta = start_pose
 
-        # which obstacle we are trying to put out
+        # Active target (index into world.obstacles)
         self.target_obs: Optional[int] = None
 
-        # how long we've been sitting near that obstacle (sec)
+        # Seconds stayed within extinguish radius of current target
         self.spray_timer: float = 0.0
 
-    def _pick_target(self, world):
-        """
-        Pick one obstacle that is currently burning.
-        Simple policy: first burning obstacle we see.
-        """
-        if self.target_obs is not None:
-            return
-        for idx, obs in enumerate(world.obstacles):
-            if obs.state == world.STATE_BURNING:
-                self.target_obs = idx
-                break
+        # Internal flag to defer clearing target until next tick (so logging sees it)
+        self._defer_clear_target: bool = False
 
-    def _move_towards_target(self, world, dt: float):
-        """
-        Placeholder "motion":
-        - if we have a target, move in a straight line toward its center.
-        This ignores kinematics for now. PRM will replace this.
-        """
+        # Simple kinematic placeholders (spec max v = 10 m/s)
+        self.v_max = 10.0  # m/s
+
+    # ------------------------
+    # Target selection/motion
+    # ------------------------
+    def _pick_target(self, world) -> None:
+        """Pick a burning obstacle. Preference: nearest burning."""
+        # If we just extinguished on the previous tick, clear after logging
+        if self._defer_clear_target:
+            self.target_obs = None
+            self._defer_clear_target = False
+
+        if self.target_obs is not None:
+            # Keep current target if it’s still burning
+            obs = world.obstacles[self.target_obs]
+            if obs.state == world.STATE_BURNING:
+                return
+            # Otherwise, release it and pick anew
+            self.target_obs = None
+
+        # Nearest burning obstacle
+        best_idx = None
+        best_d2 = float("inf")
+        for idx, obs in enumerate(world.obstacles):
+            if obs.state != world.STATE_BURNING:
+                continue
+            cx, cy = obs.center_xy()
+            dx, dy = (cx - self.x), (cy - self.y)
+            d2 = dx * dx + dy * dy
+            if d2 < best_d2:
+                best_d2 = d2
+                best_idx = idx
+
+        if best_idx is not None:
+            self.target_obs = best_idx
+
+    def _move_towards_target(self, world, dt: float) -> None:
+        """Translate toward target center with capped speed (straight-line placeholder)."""
         if self.target_obs is None:
             return
 
         cx, cy = world.obstacles[self.target_obs].center_xy()
-        dx = cx - self.x
-        dy = cy - self.y
-        dist = (dx**2 + dy**2) ** 0.5
-        if dist < 1e-6:
+        dx, dy = (cx - self.x), (cy - self.y)
+        dist = math.hypot(dx, dy)
+        if dist < 1e-9:
             return
 
-        # simple capped speed
-        v = 5.0  # m/s max speed placeholder (assignment spec says 10 m/s, so this is conservative)
-        step = min(v * dt, dist)
-        self.x += (dx / dist) * step
-        self.y += (dy / dist) * step
-        # heading update (not enforcing turn radius yet)
-        # in report we'll say PRM enforces nonholonomic feasibility,
-        # this is just a first version.
-        # theta could be math.atan2(dy, dx) later.
+        step = min(self.v_max * dt, dist)
+        ux, uy = (dx / dist), (dy / dist)
 
-    def _maybe_extinguish(self, world, dt: float, extinguish_radius=10.0, hold_time=5.0):
+        self.x += ux * step
+        self.y += uy * step
+        # Face direction of travel (placeholder; PRM/local planner will replace)
+        self.theta = math.atan2(uy, ux)
+
+    # ------------------------
+    # Extinguishing
+    # ------------------------
+    def _maybe_extinguish(
+        self,
+        world,
+        dt: float,
+        extinguish_radius: float = 10.0,
+        hold_time: float = 5.0,
+    ) -> bool:
         """
-        If we are close enough to the burning obstacle, stay there and "spray".
-        After hold_time seconds, mark it extinguished.
+        If within 'extinguish_radius' of a burning target for >= 'hold_time' seconds,
+        mark it extinguished and return True.
         """
         if self.target_obs is None:
-            return False  # nothing happened
+            self.spray_timer = 0.0
+            return False
 
         obs = world.obstacles[self.target_obs]
         if obs.state != world.STATE_BURNING:
-            return False  # already handled or burned out
+            self.spray_timer = 0.0
+            return False
 
         cx, cy = obs.center_xy()
-        dx = cx - self.x
-        dy = cy - self.y
-        dist = (dx**2 + dy**2) ** 0.5
+        dist = math.hypot(cx - self.x, cy - self.y)
 
         if dist <= extinguish_radius:
-            # we're in range: increment timer
             self.spray_timer += dt
             if self.spray_timer >= hold_time:
-                fire_state.extinguish_obstacle(world, self.target_obs)
-                self.target_obs = None
+                # Preserve target index for the caller’s logging this tick
+                idx = self.target_obs
+                fire_state.extinguish_obstacle(world, idx)
+                # Defer clearing target until the next tick so logging sees obs=<idx>
+                self._defer_clear_target = True
                 self.spray_timer = 0.0
-                return True  # we actually extinguished
+                return True
         else:
-            # moved away -> reset timer
             self.spray_timer = 0.0
 
         return False
 
-    def step(self, world, t_now: float, dt: float):
+    # ------------------------
+    # External interface
+    # ------------------------
+    def step(self, world, t_now: float, dt: float) -> bool:
         """
-        One simulation tick for the firetruck.
-        1. choose a burning obstacle if we don't have one
-        2. move toward it
-        3. try to extinguish it
-        Returns True if we extinguished something on this tick.
+        One simulation tick: pick target, move, attempt to extinguish.
+        Returns True if an obstacle was extinguished on this tick.
         """
         self._pick_target(world)
         self._move_towards_target(world, dt)
-        did_extinguish = self._maybe_extinguish(world, dt)
-        return did_extinguish
+        return self._maybe_extinguish(world, dt)
 

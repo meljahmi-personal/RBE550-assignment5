@@ -161,9 +161,6 @@ def replay_run(csv_path, world, outdir="frames"):
     # We detect the unit by magnitude:
     # - grid index is usually < 100
     # - meters could be up to WORLD_SIZE_M (~250)
-    #
-    # We'll try to interpret first two numbers as grid indices if they
-    # are "small", otherwise assume they are already meters.
     def robust_start_to_xy(start_val):
         # start_val could be tuple/list like (i,j) or (i,j,theta)
         # or maybe already (x,y) or (x,y,theta)
@@ -177,7 +174,7 @@ def replay_run(csv_path, world, outdir="frames"):
         b = float(vals[1])
 
         # heuristic: if a or b are larger than the world size in meters,
-        # that makes no sense, but if both are < ~n_cells we'll assume grid.
+        # that makes no sense, but if both are < ~n_cells assume grid.
         # Number of cells on a side:
         n_cells_est = int(round(world.WORLD_SIZE_M / world.CELL_SIZE_M))
 
@@ -227,7 +224,7 @@ def replay_run(csv_path, world, outdir="frames"):
                 label=f"{etype} event"
             )
 
-        # always try to show a legend if we plotted anything
+        # always try to show a legend 
         ax.legend(loc="upper right", fontsize=6)
 
         frame_path = os.path.join(outdir, f"frame_{idx:04d}.png")
@@ -315,7 +312,7 @@ def save_png(world, obstacles, bays, vehicle_polygon, out_path):
         # small heading marker (optional)
         cx = sum(p[0] for p in vehicle_polygon) / 4.0
         cy = sum(p[1] for p in vehicle_polygon) / 4.0
-        # we can infer a short heading if caller wants, but keeping minimal here
+
 
     ax.set_xlabel("x [m]")
     ax.set_ylabel("y [m]")

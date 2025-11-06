@@ -78,8 +78,7 @@ class PRM:
             for d, j in dlist[: self.k_neighbors]:
                 self.edges.append((i, j, d))
 
-        # At this point we have a crude roadmap graph.
-        # No return. The object just keeps nodes/edges.
+
 
     def query(self, start_xy: Tuple[float, float], goal_xy: Tuple[float, float]) -> List[Tuple[float,float]]:
         """
@@ -89,8 +88,7 @@ class PRM:
         - then return [start_xy, goal_xy] directly (straight line).
         Later, you'd run Dijkstra or A* over self.edges.
         """
-        # Snap start and goal to nearest milestones (not actually used yet downstream,
-        # but we keep the API).
+        # Snap start and goal to nearest milestones
         def nearest_node(pt):
             (px, py) = pt
             best = None

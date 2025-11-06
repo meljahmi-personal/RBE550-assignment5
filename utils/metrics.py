@@ -20,10 +20,9 @@ def main():
 
     labels = ['Wumpus planning', 'PRM build', 'PRM queries']
 
-    # --- avoid totally blank plot when everything is zero ---
+
     max_val = max(sums)
     if max_val <= 0.0:
-        # put a tiny floor just for visualization, doesn't overwrite data
         display_vals = [1e-6, 1e-6, 1e-6]
     else:
         display_vals = sums
@@ -31,8 +30,6 @@ def main():
     plt.figure()
     plt.bar(labels, display_vals)
     plt.ylabel('CPU time (s)')
-    plt.title('Compute time (sum over runs)')
-    # nice y-limit if everything was 0
     if max_val <= 0.0:
         plt.ylim(0, 1e-6 * 1.2)
     plt.tight_layout()

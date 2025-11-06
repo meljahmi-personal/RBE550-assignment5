@@ -11,6 +11,7 @@ Environment model for RBE550 HW5 (Wildfire).
 import math
 import random
 
+
 # basic map geometry
 WORLD_SIZE_M = 250.0
 CELL_SIZE_M = 5.0
@@ -26,11 +27,11 @@ class WildfireObstacle:
     def __init__(self, cells):
         """
         cells: set of (col,row) grid coords using 5m cells.
-        We'll derive a rough polygon/center from that.
         """
         self.cells = set(cells)
         self.state = STATE_INTACT
         self.burn_start_time = None  # when it started burning (sim time)
+        
 
     def center_xy(self):
         # average cell center in meters

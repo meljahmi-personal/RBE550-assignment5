@@ -9,7 +9,9 @@ from src_env.wildfire_world import WildfireWorld
 from sim.animate import replay_run, replay_run_filtered
 import imageio.v2 as imageio
 from utils.metrics import main as metrics_main
-
+import argparse
+import sys, subprocess
+from sim.run_firefight import main as run_firefight_main
 
 def make_gif(frames_pattern: str, gif_path: str, sec_per_frame: float = 0.7) -> None:
     """Read PNG frames matching pattern and write a single GIF to gif_path."""
@@ -65,25 +67,34 @@ def generate_visuals(outdir: str, seeds: list[int]) -> None:
     print("🎬 PNGs in results/frames/, GIFs in results/gifs/")
 
 
+
+
 def run_all():
     seed_base = 1000
     runs = 5
     outdir = "results"
 
     # 1) Run the simulation for all seeds
-    argv_bak = sys.argv
-    try:
-        sys.argv = [
-            "sim.run_firefight",
-            "--runs", str(runs),
-            "--duration", "3600",
-            "--outdir", outdir,
-            "--seed_base", str(seed_base),
-        ]
-        run_firefight_main()  # writes run_1000..run_1004.csv, summary.csv, champion.txt, compute_times.csv
-    finally:
-        sys.argv = argv_bak
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--runs', type=int, default=5)
+    ap.add_argument('--duration', type=int, default=3600)
+    ap.add_argument('--outdir', type=str, default='results')
+    ap.add_argument('--seed_base', type=int, default=1000)
+    args = ap.parse_args()
 
+
+    cmd = [
+        sys.executable, "-m", "sim.run_firefight",
+        "--runs", str(args.runs),
+        "--duration", str(args.duration),
+        "--outdir", args.outdir,
+        "--seed_base", str(args.seed_base),
+    ]
+    print("Running:", " ".join(cmd))
+    subprocess.run(cmd, check=True)
+
+        
+        
     # 2) Plot compute times WITHOUT subprocess
     csv_path = os.path.join(outdir, "compute_times.csv")
     png_path = os.path.join(outdir, "compute_times.png")
