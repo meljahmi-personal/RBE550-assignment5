@@ -40,30 +40,22 @@ def _run_single_sim(seed: int, duration: int, wall_time: float = 0.0):
     """
     Run one wildfire simulation for `duration` seconds of simulation time.
 
-    Parameters
-    ----------
-    seed : int
-        Random seed for world generation and agent starts.
-    duration : int
-        Total simulated seconds. The loop advances in 1 s steps.
-    wall_time : float
-        If > 0, throttle the loop so the real (wall-clock) runtime
-        is approximately this value. Does not affect simulation time.
-
     Returns
     -------
-    rows : list[list]
-        Event rows for the per-run CSV: [t, event, x, y, notes].
-    scores : tuple
-        (wumpus_ignited, wumpus_burned, truck_extinguished)
-    timings : tuple
-        (t_wumpus_total, t_prm_build, t_prm_query_total)
+    rows : list[list]    -> [t, event, x, y, notes]
+    scores : tuple       -> (wumpus_ignited, wumpus_burned, truck_extinguished)
+    timings : tuple      -> (t_wumpus_total, t_prm_build, t_prm_query_total)
     """
-    per_step_budget = (wall_time / float(duration)) if wall_time > 0 else 0.0
+    # Safe default for telemetry cadence if not defined elsewhere
+    try:
+        TELEMETRY = TELEMETRY_DT
+    except NameError:
+        TELEMETRY = 5
 
+    per_step_budget = (wall_time / float(duration)) if wall_time > 0 else 0.0
     rows = [[0, "init", 0.0, 0.0, f"seed={seed}"]]
 
-    # World
+    # ---- World ----
     world = WildfireWorld(seed=seed)
 
     # Seed one ignition at t=0 so spreading/physics have a driver
@@ -72,17 +64,36 @@ def _run_single_sim(seed: int, duration: int, wall_time: float = 0.0):
         x0, y0 = world.obstacles[0].center_xy()
         rows.append([0, "ignite", x0, y0, "obs=0 (seed)"])
 
-    # PRM (roadmap) build time
+    # ---- PRM build timing (global roadmap for Firetruck) ----
     t0 = time.perf_counter()
     prm = PRM(world)
     prm.build()
     t_prm_build = time.perf_counter() - t0
 
-    # Agents
-    wumpus = Wumpus(start_ij=world.wumpus_start)
-    truck = Firetruck(start_pose=world.firetruck_start)
+    # ---- Agents ----
+    # Wumpus spawn (integer grid cell)
+    if hasattr(world, "wumpus_start") and world.wumpus_start is not None:
+        w_start_rc = world.wumpus_start  # (r,c)
+    else:
+        w_start_rc = world.random_free_cell() if hasattr(world, "random_free_cell") else (0, 0)
+    wumpus = Wumpus(start_ij=(w_start_rc[1], w_start_rc[0]))  # (c,r)
 
-    # Score & timing accumulators
+    # Firetruck spawn (continuous pose)
+    if hasattr(world, "firetruck_start") and world.firetruck_start is not None:
+        truck = Firetruck(start_pose=world.firetruck_start)
+    else:
+        ft_rc = world.random_free_cell() if hasattr(world, "random_free_cell") else (0, 0)
+        tile = getattr(world, "cell_size_m", 5.0)
+        truck = Firetruck(start_pose=(ft_rc[1] * tile + tile / 2.0,
+                                      ft_rc[0] * tile + tile / 2.0,
+                                      0.0))
+    # Attach PRM if the agent exposes a field for it (no-op if not used)
+    try:
+        truck.prm = prm
+    except Exception:
+        pass
+
+    # ---- Score & timing accumulators ----
     wumpus_ignited = 0
     wumpus_burned = 0
     truck_extinguished = 0
@@ -91,19 +102,19 @@ def _run_single_sim(seed: int, duration: int, wall_time: float = 0.0):
     t_prm_query_total = 0.0
     burned_awarded: set[int] = set()
 
-    # Main loop (discrete time, 1 second per iteration)
+    # ---- Main loop (discrete time, 1s steps) ----
     for t_now in range(duration):
         tick_start = time.perf_counter()
 
-        # Lightweight heartbeat
+        # Heartbeat (every 5 minutes of sim time)
         if t_now % 300 == 0:
             print(f"  [seed={seed}] t={t_now}/{duration}")
 
-        # Telemetry at fixed cadence
-        if (t_now % TELEMETRY_DT) == 0:
+        # Telemetry cadence
+        if (t_now % TELEMETRY) == 0:
             rows.append([t_now, "telemetry", 0.0, 0.0, ""])
 
-        # ---- Wumpus step (may ignite adjacent obstacles) ----
+        # ---- Wumpus step (A* path + adjacent ignition) ----
         tA = time.perf_counter()
         prev_states = [obs.state for obs in world.obstacles]
         wumpus.step(world, t_now)
@@ -114,7 +125,6 @@ def _run_single_sim(seed: int, duration: int, wall_time: float = 0.0):
                 wumpus_ignited += 1
                 x, y = world.obstacles[idx].center_xy()
                 rows.append([t_now, "ignite", x, y, f"obs={idx}"])
-
         t_wumpus_total += (time.perf_counter() - tA)
 
         # ---- Firetruck step (may extinguish) ----
@@ -123,23 +133,20 @@ def _run_single_sim(seed: int, duration: int, wall_time: float = 0.0):
         if did_extinguish:
             target = getattr(truck, "target_obs", None)
             note = f"obs={target}" if target is not None else ""
-            rows.append([t_now, "extinguish", truck.x, truck.y, note])
+            rows.append([t_now, "extinguish", getattr(truck, "x", 0.0), getattr(truck, "y", 0.0), note])
             truck_extinguished += 1
         t_prm_query_total += (time.perf_counter() - tB)
 
         # ---- Fire physics (spread + burnout) ----
-        prev_states = aft_states  # reuse the latest
+        prev_states = aft_states
         update_fire(world, t_now)
         aft_states = [obs.state for obs in world.obstacles]
 
         for idx, (before, after) in enumerate(zip(prev_states, aft_states)):
-            # Spreading ignition also credits the Wumpus per rubric
             if before == world.STATE_INTACT and after == world.STATE_BURNING:
                 wumpus_ignited += 1
                 x, y = world.obstacles[idx].center_xy()
                 rows.append([t_now, "ignite", x, y, f"obs={idx}"])
-
-            # Burnout → score one "burned" exactly once
             elif (before == world.STATE_BURNING
                   and after == world.STATE_BURNED
                   and idx not in burned_awarded):
@@ -160,6 +167,7 @@ def _run_single_sim(seed: int, duration: int, wall_time: float = 0.0):
         (wumpus_ignited, wumpus_burned, truck_extinguished),
         (t_wumpus_total, t_prm_build, t_prm_query_total),
     )
+
 
 
 def main():
@@ -192,6 +200,15 @@ def main():
         start_wall = time.perf_counter()
 
         per_run_rows, scores, timing = _run_single_sim(seed, args.duration, args.wall_time)
+        
+        # append timings to results/compute_times.csv
+        ct_csv = os.path.join(args.outdir, "compute_times.csv")
+        header = not os.path.exists(ct_csv)
+        with open(ct_csv, "a") as f:
+            if header:
+                f.write("seed,t_wumpus_total,t_prm_build,t_prm_query_total\n")
+            f.write(f"{seed},{timing[0]:.6f},{timing[1]:.6f},{timing[2]:.6f}\n")
+
 
         elapsed_wall = time.perf_counter() - start_wall
         print(f"[INFO] finished {run_id} in {elapsed_wall:.2f}s")

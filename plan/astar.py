@@ -2,7 +2,8 @@
 
 import math, heapq
 from .base import BasePlanner, PlanResult
-from ..neighbors import neighbors4, neighbors8  # shared neighbor generators
+from .neighbors import neighbors4, neighbors8   # shared neighbor generators
+
 
 
 def manhattan(a, b):
