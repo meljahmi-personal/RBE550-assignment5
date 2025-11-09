@@ -35,6 +35,12 @@ from plan.prm import PRM
 # Log a telemetry row every N simulated seconds
 TELEMETRY_DT = 10
 
+def log_pos(rows, t, who, x, y):
+    rows.append([t, f"pos_{who}", float(x), float(y), ""])
+
+def log_goal(rows, t, who, gx, gy):
+    rows.append([t, f"goal_{who}", float(gx), float(gy), ""])
+
 
 def _run_single_sim(seed: int, duration: int, wall_time: float = 0.0):
     """
@@ -92,6 +98,19 @@ def _run_single_sim(seed: int, duration: int, wall_time: float = 0.0):
         truck.prm = prm
     except Exception:
         pass
+        
+
+    # Initial goal hints (centers in meters if available)
+    if hasattr(wumpus, "target_obs") and wumpus.target_obs is not None:
+        cx, cy = world.obstacles[wumpus.target_obs].center_xy()
+        log_goal(rows, 0, "wumpus", cx, cy)
+        
+
+
+    if hasattr(truck, "target_obs") and truck.target_obs is not None:
+        cx, cy = world.obstacles[truck.target_obs].center_xy()
+        log_goal(rows, 0, "truck", cx, cy)
+
 
     # ---- Score & timing accumulators ----
     wumpus_ignited = 0
@@ -104,6 +123,19 @@ def _run_single_sim(seed: int, duration: int, wall_time: float = 0.0):
 
     # ---- Main loop (discrete time, 1s steps) ----
     for t_now in range(duration):
+    
+    
+        # ---- per-tick position logs (for trail rendering) ----
+        log_pos(rows, t_now, "truck", getattr(truck, "x", 0.0), getattr(truck, "y", 0.0))
+        # Best we have for Wumpus: grid cell center in meters
+        if hasattr(wumpus, "ij"):
+            ci, cj = wumpus.ij  # (i=row, j=col)
+            tile = getattr(world, "cell_size_m", 5.0)
+            wx = cj * tile + 0.5 * tile
+            wy = ci * tile + 0.5 * tile
+            log_pos(rows, t_now, "wumpus", wx, wy)
+
+   
         tick_start = time.perf_counter()
 
         # Heartbeat (every 5 minutes of sim time)
@@ -119,6 +151,22 @@ def _run_single_sim(seed: int, duration: int, wall_time: float = 0.0):
         prev_states = [obs.state for obs in world.obstacles]
         wumpus.step(world, t_now)
         aft_states = [obs.state for obs in world.obstacles]
+        # If Wumpus picked/kept a target, log its goal center (meters)
+        if getattr(wumpus, "target_obs", None) is not None:
+            cx, cy = world.obstacles[wumpus.target_obs].center_xy()
+            log_goal(rows, t_now, "wumpus", cx, cy)
+
+        # OPTIONAL: if the Wumpus saves its most recent grid path, log sparse breadcrumbs
+        # (Uncomment if agents/wumpus.py sets self.last_path_rc = [(r,c), ...])
+        # if getattr(wumpus, "last_path_rc", None):
+        #     tile = getattr(world, "cell_size_m", 5.0)
+        #     path_rc = wumpus.last_path_rc
+        #     step = max(1, len(path_rc)//20)
+        #     for (r, c) in path_rc[::step]:
+        #         x = c * tile + 0.5 * tile
+        #         y = r * tile + 0.5 * tile
+        #         rows.append([t_now, "path_wumpus", x, y, ""])
+
 
         for idx, (before, after) in enumerate(zip(prev_states, aft_states)):
             if before == world.STATE_INTACT and after == world.STATE_BURNING:
@@ -130,6 +178,11 @@ def _run_single_sim(seed: int, duration: int, wall_time: float = 0.0):
         # ---- Firetruck step (may extinguish) ----
         tB = time.perf_counter()
         did_extinguish = truck.step(world, t_now, dt=1.0)
+        # Log Firetruck’s current goal (if any) so the arrow is visible
+        if getattr(truck, "target_obs", None) is not None:
+            cx, cy = world.obstacles[truck.target_obs].center_xy()
+            log_goal(rows, t_now, "truck", cx, cy)
+
         if did_extinguish:
             target = getattr(truck, "target_obs", None)
             note = f"obs={target}" if target is not None else ""
@@ -201,14 +254,6 @@ def main():
 
         per_run_rows, scores, timing = _run_single_sim(seed, args.duration, args.wall_time)
         
-        # append timings to results/compute_times.csv
-        ct_csv = os.path.join(args.outdir, "compute_times.csv")
-        header = not os.path.exists(ct_csv)
-        with open(ct_csv, "a") as f:
-            if header:
-                f.write("seed,t_wumpus_total,t_prm_build,t_prm_query_total\n")
-            f.write(f"{seed},{timing[0]:.6f},{timing[1]:.6f},{timing[2]:.6f}\n")
-
 
         elapsed_wall = time.perf_counter() - start_wall
         print(f"[INFO] finished {run_id} in {elapsed_wall:.2f}s")

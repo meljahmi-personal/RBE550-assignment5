@@ -7,32 +7,53 @@ sys.path.insert(0, ROOT)
 from sim.run_firefight import main as run_firefight_main
 from src_env.wildfire_world import WildfireWorld
 from sim.animate import replay_run, replay_run_filtered
-import imageio.v2 as imageio
 from utils.metrics import metrics_main
 import argparse
 import sys, os, subprocess
 from sim.run_firefight import main as run_firefight_main
+import glob, numpy as np
+from PIL import Image
+import imageio.v2 as imageio
+from sim.animate import replay_run_tiles_only
+from sim.animate import replay_full_world, replay_run_filtered, replay_run
 
 
-def make_gif(frames_pattern: str, gif_path: str, sec_per_frame: float = 0.7) -> None:
-    """Read PNG frames matching pattern and write a single GIF to gif_path."""
-    frames = sorted(glob.glob(frames_pattern))
-    if not frames:
-        print(f"[WARN] No frames matched {frames_pattern}")
+
+def make_gif(glob_pattern, gif_path, sec_per_frame=0.7, stride=2):
+    """
+    Stream frames into a GIF, resizing to the first frame's size.
+    'stride' reduces frame count & memory (2=use every other frame).
+    """
+    pngs = sorted(glob.glob(glob_pattern))
+    if not pngs:
+        print(f"[WARN] No frames match {glob_pattern}; skipping {gif_path}")
         return
 
-    if len(frames) < 2:
-        print(f"[WARN] Skipping GIF {gif_path}: only {len(frames)} frames.")
-        return
+    # stride to keep RAM/file-size in check
+    pngs = pngs[::max(1, int(stride))]
 
-    os.makedirs(os.path.dirname(gif_path), exist_ok=True)  # only for GIF folder
-    imgs = [imageio.imread(p) for p in frames]
-    imageio.mimsave(gif_path, imgs, duration=float(sec_per_frame))
-    print(f"✅ GIF: {gif_path}  ({len(frames)} frames @ {sec_per_frame:.2f}s)")
+    # target size from first frame
+    first = imageio.imread(pngs[0])
+    target_wh = (first.shape[1], first.shape[0])  # (w, h)
+
+    os.makedirs(os.path.dirname(gif_path), exist_ok=True)
+    with imageio.get_writer(gif_path, mode="I", duration=float(sec_per_frame)) as w:
+        for p in pngs:
+            arr = imageio.imread(p)
+            h, w0 = arr.shape[:2]
+            if (w0, h) != target_wh:
+                arr = np.array(Image.fromarray(arr).resize(target_wh, Image.BILINEAR))
+            w.append_data(arr)
+
+    print(f"✅ GIF: {gif_path}  ({len(pngs)} frames @ {sec_per_frame:.2f}s)")
 
 
 def generate_visuals(outdir: str, seeds: list[int]) -> None:
-    """Write PNG frames to results/frames/* and GIFs to results/gifs/*."""
+    """
+    Produce animations for submission.
+    - One unified GIF per run: wildfire_tiles_{seed}.gif (tiles change color, no trails)
+    - Optional short excerpts for each player (wumpus/truck) to satisfy the rubric.
+    """
     frames_root = os.path.join(outdir, "frames")
     gifs_root   = os.path.join(outdir, "gifs")
     os.makedirs(frames_root, exist_ok=True)
@@ -46,26 +67,36 @@ def generate_visuals(outdir: str, seeds: list[int]) -> None:
             print(f"[WARN] Missing {run_csv}, skipping seed {seed}.")
             continue
 
-    
+        # --- world instance for consistent rendering ---
         w = WildfireWorld(seed=seed)
 
-        # 1) Full run frames (PNGs only)
-        frames_dir = os.path.join(frames_root, f"frames_{seed}")
-        os.makedirs(frames_dir, exist_ok=True)
-        replay_run(run_csv, w, outdir=frames_dir)  # <-- creates only PNGs
+        # ---------- A) ONE UNIFIED GIF (like the class example) ----------
+        tiles_dir = os.path.join(frames_root, f"tiles_{seed}")
+        os.makedirs(tiles_dir, exist_ok=True)
 
-        # 2) Filtered frames (PNGs only)
+        # Renders per-frame PNGs with tile-state colors + agent markers (no trails)
+        replay_full_world(run_csv, w, outdir=tiles_dir)
+
+        # Stitch into a single GIF
+        make_gif(os.path.join(tiles_dir, "frame_*.png"),
+                 os.path.join(gifs_root, f"wildfire_tiles_{seed}.gif"),
+                 sec_per_frame=0.7)
+
+
         wumpus_dir = os.path.join(frames_root, f"frames_wumpus_{seed}")
         truck_dir  = os.path.join(frames_root, f"frames_truck_{seed}")
-        replay_run_filtered(run_csv, w, outdir=wumpus_dir, keep_types={"ignite","burned"})
+        replay_run_filtered(run_csv, w, outdir=wumpus_dir, keep_types={"ignite", "burned"})
         replay_run_filtered(run_csv, w, outdir=truck_dir,  keep_types={"extinguish"})
 
-        # 3) Make GIFs (consume PNGs -> write GIFs)
-        make_gif(os.path.join(frames_dir,  "frame_*.png"), os.path.join(gifs_root, f"wildfire_run{seed}.gif"),  sec_per_frame=0.7)
-        make_gif(os.path.join(wumpus_dir, "frame_*.png"), os.path.join(gifs_root, f"wumpus_excerpt_{seed}.gif"), sec_per_frame=0.7)
-        make_gif(os.path.join(truck_dir,  "frame_*.png"), os.path.join(gifs_root, f"truck_excerpt_{seed}.gif"),  sec_per_frame=0.7)
+        make_gif(os.path.join(wumpus_dir, "frame_*.png"),
+                 os.path.join(gifs_root, f"wumpus_excerpt_{seed}.gif"),
+                 sec_per_frame=0.7)
+        make_gif(os.path.join(truck_dir,  "frame_*.png"),
+                 os.path.join(gifs_root, f"truck_excerpt_{seed}.gif"),
+                 sec_per_frame=0.7)
 
     print("🎬 PNGs in results/frames/, GIFs in results/gifs/")
+
 
 
 def run_all():
